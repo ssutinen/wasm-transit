@@ -1156,6 +1156,24 @@ assert(empty.records.length === 0, "empty documents converge to empty");
 const garbageSync = sync.raw({ op: "sync_edits", client: "not a list", server: [], now_ms: 0 });
 assert(garbageSync.error && garbageSync.error.includes("invalid request"), "garbage requests are an error outcome, never a trap");
 
+// The answer carries the canonical document bytes and their hash — the
+// module is the hash authority, so a host stores exact bytes and never
+// mints document identity (docs/FORMATS.md).
+assert(
+  typeof converged.document === "string" &&
+    converged.document_hash === "sha256:" + createHash("sha256").update(converged.document).digest("hex"),
+  "document_hash is sha256 of the canonical document bytes",
+);
+
+// D-56: the receive path clamps the client clock — a record stamped far
+// in the future is treated as written at now_ms (and clamping is
+// idempotent, so redelivery converges).
+const future = { ...draft, status: "accepted", rev: 9, updated_at: 1e15 };
+const clamped = sync.invoke({ op: "sync_edits", client: [future], server: [], now_ms: 2000 });
+assert(clamped.records[0].updated_at === 2000, "a future-dated record is clamped at receive");
+const reclamped = sync.invoke({ op: "sync_edits", client: [clamped.records[0]], server: [], now_ms: 3000 });
+assert(reclamped.records[0].updated_at === 2000, "an already-clamped stamp is untouched (idempotent)");
+
 // The plan-chain flow — which pick governs: the spring pick in
 // force on the fixture Friday, the fall pick after it, the windows
 // derived (never stored), and the chain validating clean.

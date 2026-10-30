@@ -1,6 +1,6 @@
 [package]
 name = "cap-sync"
-description = "The sync capability: the converged state of an edit document pair — LWW merge per record id plus the submit transition, the one step of the sync protocol (transit-sync is the library; the host passes the clock). Validation against the network is every model-side module's load_edits answer, never this one's."
+description = "The sync capability: the converged state of an edit document — sync_edits (LWW merge per record id plus the submit transition, receive-clamped to the host clock, D-56, answering the canonical document and its hash), read_edits (migrate-at-receive), compact_edits (the D-57 tombstone commit). transit-sync is the library; the host passes the clock. Validation against the network is every model-side module's load_edits answer, never this one's."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

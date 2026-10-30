@@ -542,6 +542,7 @@ serve feed="" streets="" publisher="" addr="127.0.0.1:8080":
     if [ -n "{{ streets }}" ]; then args+=(-streets "{{ absolute_path(streets) }}"); fi
     if [ -n "{{ publisher }}" ]; then args+=(-publisher "{{ publisher }}"); fi
     if [ -n "${GEOCODER:-}" ]; then args+=(-geocoder "$GEOCODER"); fi
+    if [ -n "${STORE:-}" ]; then args+=(-store "$STORE"); fi
     exec go run . "${args[@]}"
 
 # Frontend dev loop: vite with hot reload on :5173 (proxies /rt,
@@ -551,8 +552,9 @@ dev: caps types
     #!/usr/bin/env bash
     set -e
     geo=(); if [ -n "${GEOCODER:-}" ]; then geo=(-geocoder "$GEOCODER"); fi
+    store=(); if [ -n "${STORE:-}" ]; then store=(-store "$STORE"); fi
     (cd server && go build -o /tmp/transit-server . && \
-      /tmp/transit-server "${geo[@]}" >/tmp/transit-server.log 2>&1 & echo $! >/tmp/transit-server.pid)
+      /tmp/transit-server "${geo[@]}" "${store[@]}" >/tmp/transit-server.log 2>&1 & echo $! >/tmp/transit-server.pid)
     trap 'kill "$(cat /tmp/transit-server.pid)" 2>/dev/null || true' EXIT
     cd web && npx vite
 
@@ -680,3 +682,24 @@ audit:
 # cargo install cargo-mutants
 mutants:
     cargo mutants -p transit-codec -p transit-router -p transit-sync -p transit-plans
+
+# Model-check the sync store engine (server/store/store.tla, run with
+# TLC over store.cfg) — the engine's invariants: ref integrity, an
+# append-only chained log, GC safety, CAS authority, crash safety
+# (docs/units/sync-persistence.md). OPTIONAL: run it only when a change
+# touches the sync engine (server/store/, the /pointers + /blobs +
+# /edits store surface, or the spec itself) — nothing else needs Java.
+# Needs Java 11+ (current tla2tools) and tla2tools.jar from
+# github.com/tlaplus/tlaplus/releases (the user's install; TLA_JAR or
+# ~/bin/tla2tools.jar). Deliberately NOT part of `just test`.
+spec:
+    #!/usr/bin/env bash
+    set -e
+    jar="${TLA_JAR:-$HOME/bin/tla2tools.jar}"
+    if ! command -v java >/dev/null 2>&1 || [ ! -f "$jar" ]; then
+        echo "just spec is OPTIONAL (only for sync-engine changes) and needs Java 11+ and tla2tools.jar"
+        echo "(set TLA_JAR=/path/to/tla2tools.jar; get it from github.com/tlaplus/tlaplus/releases)"
+        echo "nothing else needs Java: 'just test' runs without it"
+        exit 1
+    fi
+    java -XX:+UseParallelGC -cp "$jar" tlc2.TLC -config server/store/store.cfg server/store/store.tla

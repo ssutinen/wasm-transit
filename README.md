@@ -48,6 +48,9 @@ just serve path/to/gtfs.zip                  # + /network (the zip, imported onc
 just serve path/to/gtfs.zip roads.geojson    # + /streets and /walks (the layer imported
                                              # once, the walk table derived from both)
 just serve path/to/gtfs.zip "" "Test Transit"   # + the manifest's publisher
+STORE=./store just serve path/to/gtfs.zip      # + the durable sync store: content-addressed
+                                               # blobs + CAS'd pointers under ./store
+                                               # (/pointers, /blobs; docs/FORMATS.md)
 just dev                                     # vite hot reload + the server
 ```
 

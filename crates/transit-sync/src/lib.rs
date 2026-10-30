@@ -299,6 +299,79 @@ pub fn set_retired(records: &[EditRecord], record_id: &str, retired: bool, now_m
     Ok(next)
 }
 
+// ---------------------------------------------------------------------
+// The stored document: envelope, schema version, the receive path
+// ---------------------------------------------------------------------
+
+/// The current schema version of every document kind this crate
+/// defines. A bump is deliberate; old blobs stay readable under their
+/// hash, and a document written under an older schema migrates when
+/// it arrives, not when it is read (docs/FORMATS.md).
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// The kind of a stored document, as its envelope sidecar spells it
+/// (`docs/FORMATS.md`). GTFS stays the interchange for published
+/// products; these kinds cover what GTFS cannot express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentKind {
+    NetworkDocument,
+    EditRecords,
+    DiversionDraft,
+    Manifest,
+    Plans,
+}
+
+/// The typed envelope stored next to every blob: the hash names the
+/// bytes, the envelope says how to read them. `produced_by` pins the
+/// producing module's hash (`cap-sync@sha256:…`), or `server` for
+/// host-owned documents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Envelope {
+    pub kind: DocumentKind,
+    pub schema_version: u32,
+    /// e.g. "cap-sync@sha256:<hex>" or "server".
+    pub produced_by: String,
+}
+
+/// The receive path's clock rule (D-56): a record claiming a future
+/// `updated_at` is treated as written now. Clamping is idempotent —
+/// clamping a clamped document changes nothing — so at-least-once
+/// redelivery still converges to the same hash.
+pub fn clamp_timestamps(records: &[EditRecord], now_ms: u64) -> Vec<EditRecord> {
+    records
+        .iter()
+        .map(|r| {
+            let mut r = r.clone();
+            r.updated_at = r.updated_at.min(now_ms);
+            r
+        })
+        .collect()
+}
+
+/// Compaction (D-57): drop tombstones older than the horizon. Only
+/// `retired` records with `updated_at < now_ms - horizon_ms` go;
+/// in-force records are never dropped, and the input is never mutated.
+/// Returns the compacted document and how many records were dropped.
+pub fn compact(records: &[EditRecord], now_ms: u64, horizon_ms: u64) -> (Vec<EditRecord>, usize) {
+    let horizon = now_ms.saturating_sub(horizon_ms);
+    let mut dropped = 0;
+    let kept = records
+        .iter()
+        .filter(|r| {
+            let old_tombstone = r.status == EditStatus::Retired && r.updated_at < horizon;
+            if old_tombstone {
+                dropped += 1;
+            }
+            !old_tombstone
+        })
+        .cloned()
+        .collect();
+    (kept, dropped)
+}
+
 /// Read a stored edit document (IndexedDB, a server response, a file):
 /// every record that deserializes under the CURRENT schema — serde
 /// fills the defaults a record from before a field existed lacks —
@@ -435,6 +508,98 @@ mod tests {
 
         docs[0].status = EditStatus::Retired;
         assert!(in_force_on(&docs, date).is_empty(), "retired edits never apply");
+    }
+}
+
+#[cfg(test)]
+mod receive_tests {
+    use super::*;
+
+    fn rec(id: &str, status: EditStatus, rev: u64, updated_at: u64) -> EditRecord {
+        EditRecord {
+            id: id.into(),
+            diversion: Diversion {
+                id: format!("d-{id}"),
+                route_id: "r1".into(),
+                direction_id: None,
+                first_kept_stop: "s0".into(),
+                last_kept_stop: "s1".into(),
+                skipped_stops: vec![],
+                detour: None,
+                added_secs: 60,
+                start_date: chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap(),
+                end_date: chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap(),
+            },
+            status,
+            rev,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn a_future_dated_record_is_clamped_at_receive() {
+        let future = rec("e1", EditStatus::Submitted, 3, 10_000);
+        let clamped = clamp_timestamps(&[future.clone()], 5_000);
+        assert_eq!(clamped[0].updated_at, 5_000, "a future stamp is treated as now");
+        assert_eq!(clamped[0].rev, 3, "clamping touches only the clock");
+
+        let honest = rec("e2", EditStatus::Draft, 1, 4_000);
+        assert_eq!(clamp_timestamps(&[honest], 5_000)[0].updated_at, 4_000, "honest stamps untouched");
+
+        // Idempotent: clamping twice == clamping once, so redelivery converges.
+        let once = clamp_timestamps(&[future], 5_000);
+        assert_eq!(clamp_timestamps(&once, 5_000), once);
+
+        // And the clamp actually bounds the LWW order: the future-dated
+        // record no longer beats a later honest write.
+        let server = vec![rec("e1", EditStatus::Retired, 4, 6_000)];
+        let merged = merge(&clamped, &server);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].status, EditStatus::Retired, "6000 beats the clamped 5000");
+    }
+
+    #[test]
+    fn compact_drops_only_retired_records_past_the_horizon() {
+        let now = 1_000_000u64;
+        let horizon = 100_000u64;
+        let docs = vec![
+            rec("old-retired", EditStatus::Retired, 2, now - 200_000),   // dropped
+            rec("new-retired", EditStatus::Retired, 2, now - 50_000),    // kept
+            rec("old-accepted", EditStatus::Accepted, 9, now - 900_000), // kept: in force
+            rec("draft", EditStatus::Draft, 1, now - 900_000),          // kept
+        ];
+        let (kept, dropped) = compact(&docs, now, horizon);
+        assert_eq!(dropped, 1);
+        assert_eq!(kept.len(), 3);
+        assert!(kept.iter().all(|r| r.id != "old-retired"));
+        assert_eq!(docs.len(), 4, "the input is never mutated");
+
+        // Idempotent: compacting a compacted document drops nothing.
+        let (again, dropped_again) = compact(&kept, now, horizon);
+        assert_eq!(dropped_again, 0);
+        assert_eq!(again, kept);
+    }
+
+    #[test]
+    fn envelope_and_kind_round_trip_with_documented_names() {
+        let env = Envelope {
+            kind: DocumentKind::EditRecords,
+            schema_version: SCHEMA_VERSION,
+            produced_by: "cap-sync@sha256:abcd".into(),
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.contains("\"kind\":\"edit_records\""), "{json}");
+        assert!(json.contains("\"schema_version\":1"), "{json}");
+        assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), env);
+        for (kind, name) in [
+            (DocumentKind::NetworkDocument, "network_document"),
+            (DocumentKind::EditRecords, "edit_records"),
+            (DocumentKind::DiversionDraft, "diversion_draft"),
+            (DocumentKind::Manifest, "manifest"),
+            (DocumentKind::Plans, "plans"),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{name}\""));
+        }
     }
 }
 

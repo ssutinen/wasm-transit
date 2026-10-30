@@ -11,7 +11,13 @@
 //! 3. the answer is byte-deterministic — the same pair merges to
 //!    the same document in any input order (client and server are
 //!    roles, not order);
-//! 4. garbage and bulk bytes are honest errors, never panics.
+//! 4. garbage and bulk bytes are honest errors, never panics;
+//! 5. the receive path clamps the client clock to `now_ms` (D-56),
+//!    and the answer carries the canonical document bytes plus their
+//!    hash, so a host stores exact bytes and never mints identity;
+//! 6. `read_edits` migrates a received document at receive (defaults
+//!    fill what age removed, malformed records are counted, never
+//!    wedging it), and `compact_edits` is the D-57 tombstone commit.
 
 use cap_sync::{dispatch, dispatch_bytes, dispatch_json, Request, Response};
 use transit_sync::{Diversion, EditRecord, EditStatus};
@@ -41,7 +47,7 @@ fn record(id: &str, status: EditStatus, rev: u64, updated_at: u64) -> EditRecord
 
 fn synced(client: Vec<EditRecord>, server: Vec<EditRecord>, now_ms: u64) -> Vec<EditRecord> {
     match dispatch(Request::SyncEdits { client, server, now_ms }).unwrap() {
-        Response::SyncEdits { records } => records,
+        Response::SyncEdits { records, .. } => records,
         _ => panic!("sync_edits"),
     }
 }
@@ -108,4 +114,90 @@ fn garbage_and_bulk_bytes_are_errors_not_panics() {
     // The tagged wire form round-trips.
     let ok = dispatch_json(r#"{"op":"sync_edits","client":[],"server":[],"now_ms":0}"#);
     assert!(ok.contains(r#""records":[]"#), "{ok}");
+}
+
+#[test]
+fn sync_edits_clamps_the_client_clock() {
+    // D-56: a client whose clock runs fast cannot mint a record that
+    // beats every honest write — the receive path clamps to now_ms.
+    let future = record("e1", EditStatus::Accepted, 5, 10_000);
+    let mut tombstone = record("e1", EditStatus::Accepted, 3, 2);
+    tombstone.status = EditStatus::Retired;
+    tombstone.updated_at = 6_000;
+
+    let out = match dispatch(Request::SyncEdits {
+        client: vec![future],
+        server: vec![tombstone.clone()],
+        now_ms: 5_000,
+    })
+    .unwrap()
+    {
+        Response::SyncEdits { records, .. } => records,
+        _ => panic!("sync_edits"),
+    };
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].status, EditStatus::Retired, "the clamped stamp (5000) loses to the honest 6000");
+    assert_eq!(out[0].updated_at, 6_000);
+
+    // Without the tombstone the clamped record stands at now_ms.
+    let out = synced(vec![record("e1", EditStatus::Draft, 1, 10_000)], vec![], 5_000);
+    assert_eq!(out[0].updated_at, 5_000, "submit re-stamps drafts at the host clock anyway");
+}
+
+#[test]
+fn the_answer_carries_the_canonical_document_and_its_hash() {
+    let client = vec![record("e1", EditStatus::Draft, 1, 1)];
+    match dispatch(Request::SyncEdits { client, server: vec![], now_ms: 1_000 }).unwrap() {
+        Response::SyncEdits { records, document, document_hash } => {
+            assert_eq!(document, serde_json::to_string(&records).unwrap(), "canonical bytes");
+            assert_eq!(document_hash, cap_abi::canonical_hash(&records).unwrap(), "the module is the hash authority");
+            assert!(document_hash.starts_with("sha256:"), "{document_hash}");
+        }
+        _ => panic!("sync_edits"),
+    }
+}
+
+#[test]
+fn read_edits_migrates_a_received_document_at_receive() {
+    let good = serde_json::to_value(record("e1", EditStatus::Submitted, 2, 100)).unwrap();
+    let mut old = good.clone();
+    let d = old["diversion"].as_object_mut().unwrap();
+    for f in ["direction_id", "skipped_stops", "detour", "added_secs"] {
+        d.remove(f);
+    }
+    let mut bad_date = good.clone();
+    bad_date["diversion"]["start_date"] = "soon".into();
+    let doc = serde_json::json!([good, old, bad_date, {"id": "x"}, 7]);
+
+    match dispatch(Request::ReadEdits { document: doc }).unwrap() {
+        Response::ReadEdits { records, dropped, schema_version, document, document_hash } => {
+            assert_eq!(records.len(), 2, "defaults fill what age removed");
+            assert_eq!(dropped, 3, "malformed records are counted, never wedging the document");
+            assert_eq!(records[1].diversion.added_secs, 0);
+            assert_eq!(schema_version, transit_sync::SCHEMA_VERSION);
+            assert_eq!(document, serde_json::to_string(&records).unwrap());
+            assert_eq!(document_hash, cap_abi::canonical_hash(&records).unwrap());
+        }
+        _ => panic!("read_edits"),
+    }
+}
+
+#[test]
+fn compact_edits_is_the_d57_tombstone_commit() {
+    let now = 1_000_000u64;
+    let horizon = 100_000u64;
+    let records = vec![
+        record("old-retired", EditStatus::Retired, 2, now - 200_000),
+        record("live", EditStatus::Accepted, 9, now - 900_000),
+    ];
+    match dispatch(Request::CompactEdits { records, now_ms: now, horizon_ms: horizon }).unwrap() {
+        Response::CompactEdits { records, document, document_hash, dropped } => {
+            assert_eq!(dropped, 1);
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].id, "live", "in-force records are never dropped");
+            assert_eq!(document, serde_json::to_string(&records).unwrap());
+            assert_eq!(document_hash, cap_abi::canonical_hash(&records).unwrap());
+        }
+        _ => panic!("compact_edits"),
+    }
 }

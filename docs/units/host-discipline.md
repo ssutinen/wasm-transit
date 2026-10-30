@@ -59,9 +59,10 @@ answer-graph table (`docs/ARCHITECTURE.md`, "Generated UIs", step
 5), and the engine is designed from those tables. What a table
 cannot express (a timer-driven live input, for one) is written
 here as an engine requirement. The store's
-reflog and pointer CAS land with
-[sync-persistence.md](sync-persistence.md) — a second persistence
-design is rejected on sight.
+log and pointer CAS landed in the Go server (`server/store/`,
+[sync-persistence.md](sync-persistence.md)) — the per-device journal
+reuses the same envelope + hash-chained log shape
+(`docs/FORMATS.md`); a second persistence design is rejected on sight.
 
 Engine requirements the tables cannot express:
 

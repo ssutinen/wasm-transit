@@ -38,7 +38,7 @@ the rest of the work can go ahead while the decision is reviewed.
   and the `Blocked: D-N` lines are removed. A later answer that
   reverses one is a new entry naming the entry it replaces; the old
   entry's state says so.
-- IDs are never reused; the next new decision is **D-56**.
+- IDs are never reused; the next new decision is **D-58**.
 
 ## Summary
 
@@ -96,6 +96,8 @@ the rest of the work can go ahead while the decision is reviewed.
 | D-53 | What ridership data does the planner bring? | unanswered | `ui-service-design` question 10 |
 | D-54 | What does a frequency change keep of the trips already there? | unanswered | QAF-90, `ui-service-design` question 16 |
 | D-55 | Which members does a service group count on a day? | unanswered | QAF-91 |
+| D-56 | Whose clock is the LWW clock? | encoded | the receive path of sync-persistence |
+| D-57 | How long does a tombstone live? | encoded | the GC/retention section of sync-persistence |
 
 ## The trip model
 
@@ -1072,6 +1074,61 @@ Options:
 - Keep the network fetch; the finding is documented as a known
   offline limit.
 Blocks: QAF-84.
+
+## Sync and persistence
+
+### D-56 — Whose clock is the LWW clock?
+State: Encoded provisionally.
+Context: `transit_sync::merge` orders records by `updated_at`, stamped
+by the writer — the client's clock for local edits, the server's
+`now_ms` only for the submit transition. A device whose clock runs
+fast mints a record that beats every honest record until real time
+passes it, and skew can resurrect a retired record. Convergence needs
+one clock, and the fix must stay idempotent: at-least-once redelivery
+of the same document has to converge to the same hash.
+Options:
+- Client clocks as they are (the old behavior): broken under skew —
+  a future-dated record wins indefinitely.
+- **Clamp at receive (encoded).** The receive path sets
+  `updated_at = min(updated_at, now_ms)` on every incoming record
+  before merging; submit still stamps `now_ms`. A future-dated writer
+  is treated as written now, client order survives within honest
+  skew, and clamping a clamped value is a no-op, so redelivery stays
+  idempotent.
+- Re-stamp every record with the server clock at receive: strongest,
+  but not idempotent — redelivering the same document would mint a
+  new hash, breaking the converge-to-same-hash invariant.
+Pinned by: `transit-sync` law test
+`a_future_dated_record_is_clamped_at_receive`, cap-sync dispatch test
+`sync_edits_clamps_the_client_clock`, and the store's clock-skew
+session through a restarted server.
+Blocks: the receive path of `docs/units/sync-persistence.md` (being
+built on the encoded answer).
+
+### D-57 — How long does a tombstone live?
+State: Encoded provisionally.
+Context: the edit document grows monotonically — a retirement is a
+tombstone kept so deletions propagate through sync, so whole-document
+sync never shrinks and every new device receives every retired
+diversion. Dropping a tombstone can resurrect a record redelivered
+after it, so the horizon must exceed the longest offline redelivery.
+Options:
+- Never compact (the old behavior): the document grows forever.
+- **Compaction commit with a horizon (encoded).** The kind's
+  `compact_edits` op drops records that are retired AND whose
+  `updated_at` is older than `now_ms - horizon_ms`; the host runs it
+  as an ordinary CAS'd commit, audited in the store log. Default
+  horizon 90 days (`-retention-days`). With D-56's clamp a
+  redelivered record can carry at most "now" as its stamp, so a
+  resurrection needs a record older than the horizon arriving after
+  compaction — accepted and documented.
+- Compaction as a derived view (readers skip old tombstones): no
+  resurrection risk, but the stored document and the delta log never
+  shrink.
+Pinned by: `transit-sync` law test
+`compact_drops_only_retired_records_past_the_horizon`, cap-sync
+`compact_edits` dispatch test, and the store GC test.
+Blocks: the GC/retention section of `docs/units/sync-persistence.md`.
 
 ## Agency data
 

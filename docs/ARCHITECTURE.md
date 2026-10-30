@@ -408,8 +408,14 @@ transit-streets THE streets model. `model.rs`: the streets document
                 a freeway from an arterial (QAF-85). Open work:
                 `docs/units/streets-model.md`.
 cap-sync        The sync capability: the converged state of an edit
-                document pair — LWW merge + the submit transition,
-                the protocol's one step (the op behind POST /edits).
+                document — its lifecycle facets: sync_edits (LWW merge
+                + the submit transition, with the receive path
+                clamping client clocks to the host's, D-56; the
+                answer carries the canonical document bytes and their
+                hash — the op behind POST /edits), read_edits
+                (migrate-at-receive: typed parse, defaults fill what
+                age removed, malformed dropped and counted), and
+                compact_edits (the D-57 tombstone-retention commit).
                 Stateless; validation is NOT here (load_edits
                 answers it against the network in every model-side
                 module — one question, one answer).
@@ -485,6 +491,16 @@ spends 11.8 s on the import and the table; the page fetches 4.5 MB
 document in 0.47 s; the first `access` builds the walking graph in
 0.32 s, later ones answer in ~14 ms.
 
+With `-store <dir>` the server keeps a content-addressed store
+(`docs/units/sync-persistence.md`, `docs/FORMATS.md`): immutable blobs
+under `blobs/<hex>` with a typed envelope sidecar, and one append-only
+log per pointer under `pointers/<name>.log` — the pointer is the log's
+last entry, and a commit is blob-write + one log append, CAS'd on the
+`from` hash. The `manifest` pointer is the root (publishing is one CAS
+on it); the `edits` pointer is the multi-writer LWW document. Without
+`-store`, `-edits <path>` persists the edit document as one flat file
+and everything else is in process.
+
 Its HTTP surface:
 
 - `/` — `web/dist` (stdlib `http.ServeContent`, so the Range
@@ -530,8 +546,19 @@ Its HTTP surface:
   `load_network` and refuses it unless the module answers the
   pinned hash (`servedNetwork` in `src/uis/kit.ts`).
 - `/edits` — the edit document: `POST` a client document, receive
-  the LWW-merged result (cap-sync's `sync_edits`); `GET` reads the
-  server's. `-edits <path>` persists it across restarts.
+  the LWW-merged result (cap-sync's `sync_edits`, with the receive
+  path clamping client timestamps to the server clock, D-56); `GET`
+  reads the server's. With `-store` this is the `edit_records`
+  pointer, CAS'd through the store (a CAS conflict retries against
+  the re-read document); without it, `-edits <path>` persists it as
+  one flat file across restarts, else in memory.
+- Store mode also exposes the generic surface (`-store` only):
+  `GET /pointers/{name}`, `GET /pointers/{name}/log?since=<hash>`
+  (delta sync over the append-only log), `POST /pointers/{name}`
+  (`{from, …}` → 200 + new head, 409 + current on conflict), and
+  `GET /blobs/{hash}` (raw bytes, ETag the hash, envelope in headers).
+  `GET /manifest` serves the `manifest` pointer's blob, re-committed
+  when the published feed, streets, module, or services change.
 
 `go test ./...` in `server/` proves the server runs the exact
 module bytes the manifest pins and answers what the browser does.

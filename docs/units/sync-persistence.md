@@ -1,100 +1,73 @@
 # Sync persistence
 
-The Go server today merges edit documents through cap-sync
-(`POST /edits`) and keeps the result in process. Persistence is
-the store's two git pieces, applied server-side and per device.
-Durable storage is not a closed system: the blobs are
-self-describing and documented, so another application or a
-person reads them without any of the wasm.
+The durable sync store. **Landed (first slice):** the Go store engine
+(`server/store/`) — content-addressed blobs with typed envelope
+sidecars, one append-only JSONL log per pointer (the pointer is the
+log's last entry; a commit is blob-write + one fsync'd append, CAS'd
+on the `from` hash, flock'd across processes), GC of crash-torn
+orphans, and idempotent redelivery (re-committing the same bytes is a
+no-op: same hash, same seq). The HTTP surface (`-store <dir>`):
+`/pointers/{name}`, `/pointers/{name}/log?since=`, `POST
+/pointers/{name}` (CAS; `edit_records` runs cap-sync's merge under the
+hood), `/blobs/{hash}`; `/edits` is the `edit_records` specialization
+with an internal CAS retry loop (legacy whole-document protocol
+unchanged), and `/manifest` serves the `manifest` ROOT pointer —
+publishing is one CAS on it. cap-sync answers carry the canonical
+`document` + `document_hash` (the module is the hash authority; the
+store asserts `sha256(bytes) == hash`). D-56 is encoded: the receive
+path clamps `updated_at` to the server clock. D-57 is encoded:
+`compact_edits` drops retired records past the horizon (`-retention-days`,
+default 90), committed as an ordinary logged CAS (at startup today).
+Formats: `docs/FORMATS.md`. Engine spec: `server/store/store.tla`
+(`just spec`). The legacy mode (no `-store`: in-memory, or `-edits`
+flat file, seeded into the store on first use) still runs.
 
-## Scope
+## What remains
 
-- **Blobs + pointers**: documents stored as immutable blobs under
-  their content hash; a pointer names the current one.
-- **Migrate-at-receive**: a document written under an older schema
-  migrates when it arrives, not when it is read.
-- **Pointer CAS**: a pointer moves only from the hash the writer
-  last saw. Writers may contend per pointer: a failed CAS
-  re-reads the current document and answers again — the conflict
-  function is the document kind's (the edit document joins, LWW
-  merge; a plan forks, the chain resolves). The store stays
-  generic; no single-writer invariant depends on topology.
-- **The store reflog**: pointer-move history, so migrations and
-  rollbacks are audited facts. The journal of
-  [host-discipline.md](host-discipline.md) is the same mechanism
-  at per-device scope — there is one persistence design, not two.
-- **Self-describing blobs**: every stored document carries a typed
-  envelope — `kind` (network_document, edit_records,
-  diversion_draft, manifest), `schema_version`, `produced_by` —
-  next to the bytes the content hash names. The hash names them,
-  the envelope says how to read them. GTFS stays the interchange
-  for published products; the envelope covers what GTFS cannot
-  express (patterns, directions, timing profiles, the plan
-  chain), and no second interchange format is invented.
-- **Generated schemas**: JSON Schema emitted from the serde types
-  (the TS-bindings rule: Rust is the source, the schema is
-  generated, never hand-written) and published with the registry's
-  evidence. `docs/FORMATS.md` documents the invariants the schema
-  cannot (dates as "YYYY-MM-DD", times as u32 seconds past
-  86400, the LWW order, tombstone semantics) with a worked
-  example per kind.
-- **Explicit versioning**: a `schema_version` bump is deliberate;
-  old blobs stay readable under their hash (a reader pins a
-  version and ignores newer ones), and migrate-at-receive is the
-  system's own reader of the same rule.
-- **At rest, not on the wire**: the self-describing contract binds
-  what the store persists. Sync payloads and caches may compress
-  for performance — decompression happens before a document is
-  stored or read, and no compressed format is ever the durable
-  one.
-- **The commit is a pointer CAS**: blob writes are additive and
-  idempotent (a torn write is an orphan, garbage to collect, not
-  corruption); a change commits as ONE CAS from the hash the
-  writer last saw, and the reflog entry is its audit. Sync
-  redelivery is idempotent — `merge` is a pure semilattice, so
-  at-least-once transport converges to the same hash; no
-  exactly-once delivery is needed. Caches (server memory, device
-  stores) are materializations of pointer + blobs: torn or stale
-  means rebuild, never a correctness fact. Cross-pointer
-  atomicity is not built until a real need lands — it would be a
-  commit object (one pointer naming a set of hashes, git-tree
-  style); per-pointer contention already covers multi-writer
-  documents.
-- **The engine is model-checked**: the store engine (writers
-  contending per pointer, GC, crash points) has a TLA+ spec,
-  model-checked for: every pointer, current or in the reflog,
-  names a durable blob; the reflog is an append-only history
-  whose from-hash is the prior pointer; GC never deletes a blob
-  any pointer or reflog entry names; a failed CAS leaves
-  authority untouched; and devices receiving the same records in
-  any order, at-least-once, converge to the same hash. The merge
-  semilattice stays in proptest — it is a pure function, and the
-  spec covers the engine's interleavings, not algebra the
-  property tests already own.
+- **Generated schemas + registry evidence.** JSON Schema emitted from
+  the serde types (never hand-written) for every document kind,
+  published with the registry's evidence; a Go test validates a stored
+  blob against the schema and reads it with no Rust/wasm — plus a
+  reader outside the wasm interpreting a blob through the envelope,
+  the schema, and `docs/FORMATS.md` alone.
+- **The plans pointer + publish → serve → resolve** (roadmap #1): plan
+  documents on the store, the manifest growing plan pointers, clients
+  resolving "which pick is in force" through cap-plans and re-pinning.
+  Needs this store (landed) — the manifest-as-root makes the publish
+  one CAS.
+- **cap-authz**: enforce the reserved `writer`/`policy` log fields
+  (fail-closed policy document, server-side assembly); today the
+  fields are recorded, not enforced, and `/edits` is unauthenticated —
+  fine on localhost, not beyond it.
+- **Per-device journal unification** ([host-discipline.md](host-discipline.md)):
+  the browser journal reuses the envelope + hash-chained log shape, so
+  a device journal replays against the server store.
+- **GC cadence**: orphans are collected at `Open`; add a periodic
+  in-process sweep (the log is append-only forever by design — the
+  delta window is the whole history; document growth is compaction's
+  job, D-57).
 
-The Go server stays scaffolding: blob and pointer storage is I/O,
-and any domain rule the server needs becomes a capability module.
+## Done when (the remaining pins)
 
-## Done when
+- The registry publishes the generated schemas and worked examples as
+  evidence; a Go test validates a stored blob against the generated
+  JSON Schema with no Rust/wasm and reads the plan chain from it;
+  `docs/FORMATS.md` covers the rest (it landed with the store).
+- A C-TRAN session syncs an edit document through a RESTARTED server
+  (`-store`) and resolves a real plan chain through cap-plans — this
+  also pays the sync/plans line of [grade-debt.md](grade-debt.md).
 
-- Go round-trip tests cover CAS conflicts and reflog replay
-  (`go test -race`), including idempotent redelivery of the same
-  edit batch (same resulting hash) and a crash between blob write
-  and pointer move (the old authority stays readable; the orphan
-  is collected).
-- The TLA+ spec is model-checked with no invariant violations
-  at small bounds (two writers contending on one pointer, one
-  GC, every crash point): TLC (explicit, exhaustive — the
-  default for a state space this small), or Apalache (symbolic,
-  same module) if the bounds outgrow enumeration. `just spec`
-  runs it, separate from `just test`, which must stay runnable
-  without Java.
-- A reader outside the wasm interprets a stored blob through the
-  envelope, the published schema, and `docs/FORMATS.md` alone
-  (a Go test validates a blob against the generated JSON Schema
-  and reads the plan chain from it — no Rust, no wasm).
-- The registry publishes the schemas and the worked examples as
-  evidence, and `docs/FORMATS.md` lands in the same change.
-- A C-TRAN session syncs an edit document through a restarted
-  server and resolves a real plan chain through cap-plans (this
-  also pays the sync/plans line of [grade-debt.md](grade-debt.md)).
+Already pinned by the landed slice (kept as regression gates, not
+re-listed here): `go test -race ./...` covers CAS conflicts, log
+replay, idempotent redelivery (same hash AND seq), crash-between-blob-
+and-append (old authority readable, orphan collected at next `Open`),
+delta sync (`/log?since=`, unknown since → whole document), the
+`/blobs` ETag/envelope headers, and `just spec` model-checking
+`server/store/store.tla` clean (TLC 2.19, 2026-10-30, in a toolbox
+container: 1207 states generated, 214 distinct, no invariant violations,
+fingerprint-collision estimate 1.2E-14; `CHECK_DEADLOCK FALSE` for the
+artificial `MaxCommits` bound), plus the D-56 clock clamp through the
+receive path, and edits surviving a server restart; `cargo test`
+pins the transit-sync laws (clamp, compact, envelope) and the cap-sync
+seam (canonical document + hash in every answer); caps-smoke pins the
+hash formula end to end.

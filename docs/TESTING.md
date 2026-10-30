@@ -38,7 +38,12 @@ the implementation, so the tests certified the bug. The rules:
 Two runners: `just test` is the host-side gate (no browser) — run
 it before declaring any change done; `just e2e` adds the browser
 runner, for changes that touch user-visible flows; `just check`
-runs both, for changes that touch both sides.
+runs both, for changes that touch both sides. A third runner is
+optional: `just spec` model-checks the sync store engine
+(`server/store/store.tla`) and needs Java 11+ plus tla2tools.jar —
+run it only when a change touches the sync engine (`server/store/`,
+the store's HTTP surface, or the spec itself); nothing else requires
+Java, and `just test` never does.
 
 1. **Unit/property tests in the owning crate** (oracle style for
    laws — e.g. `transit-network`'s `trip_law_test` holds that trips

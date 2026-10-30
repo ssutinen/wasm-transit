@@ -9,6 +9,11 @@ package main
 //              response: the converged document — the client
 //              adopts it wholesale.
 // GET  /edits  returns the server's document.
+//
+// With -store, /edits is the edit_records pointer of the content-
+// addressed store (docs/FORMATS.md): POST runs the CAS retry loop over
+// the merge, GET serves the head blob (ETag = its hash). Without it,
+// the legacy flat-file (-edits) or in-memory path runs unchanged.
 
 import (
 	"encoding/json"
@@ -16,10 +21,15 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
 func (s *server) handleEdits(w http.ResponseWriter, r *http.Request) {
+	if s.store != nil {
+		s.handleStoreEdits(w, r)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.handleGetEdits(w, r)
@@ -27,6 +37,101 @@ func (s *server) handleEdits(w http.ResponseWriter, r *http.Request) {
 		s.handlePostEdits(w, r)
 	default:
 		http.Error(w, "use GET or POST", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleStoreEdits is /edits over the store: the pointer's head blob is
+// the authority, and a POST commits the merged document through a CAS
+// retry loop (a contending writer is re-read and re-merged, never
+// clobbered).
+func (s *server) handleStoreEdits(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		head, found, err := s.store.Head("edits")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !found {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte("[]"))
+			return
+		}
+		data, _, err := s.store.GetBlob(head.Hash)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		etag := `"` + head.Hash + `"`
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "no-cache")
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(data)
+	case http.MethodPost:
+		body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+		if err != nil {
+			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		writer := r.Header.Get("X-Writer")
+		if writer == "" {
+			writer = "anonymous"
+		}
+		document, hash, err := s.commitEdits(json.RawMessage(body), writer)
+		if err != nil {
+			if strings.Contains(err.Error(), "moved") {
+				http.Error(w, "conflict: the edit document moved, retry", http.StatusConflict)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"`+hash+`"`)
+		w.Write([]byte(document))
+	default:
+		http.Error(w, "use GET or POST", http.StatusMethodNotAllowed)
+	}
+}
+
+// maybeCompactEdits runs the D-57 tombstone-retention commit at startup
+// (and is reusable after): retired records older than the horizon are
+// dropped by cap-sync's compact_edits, committed as an ordinary CAS'd
+// log entry, so the compaction is audited like any other commit.
+func (s *server) maybeCompactEdits() {
+	if s.store == nil {
+		return
+	}
+	nowMs := time.Now().UnixMilli()
+	horizonMs := int64(s.retentionDays) * 24 * 3600 * 1000
+	head, found, err := s.store.Head("edits")
+	if err != nil || !found {
+		return
+	}
+	body, _, err := s.store.GetBlob(head.Hash)
+	if err != nil {
+		return
+	}
+	records, _, _, _, err := s.readEdits(body)
+	if err != nil {
+		return
+	}
+	var resp struct {
+		Document     string `json:"document"`
+		DocumentHash string `json:"document_hash"`
+		Dropped      int    `json:"dropped"`
+	}
+	if err := s.syncOp(map[string]any{
+		"op": "compact_edits", "records": records, "now_ms": nowMs, "horizon_ms": horizonMs,
+	}, &resp); err != nil || resp.Dropped == 0 {
+		return
+	}
+	if _, _, err := s.store.CAS("edits", head.Hash, []byte(resp.Document), s.syncEnvelope(), resp.DocumentHash, "gc", nowMs); err == nil {
+		fmt.Printf("compacted %d tombstone(s) past the %d-day horizon\n", resp.Dropped, s.retentionDays)
 	}
 }
 

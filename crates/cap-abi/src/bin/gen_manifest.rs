@@ -275,7 +275,7 @@ const MODULES: &[ModuleSpec] = &[
         consumes: &[],
         speaks: &[("operator_edits", &[1])],
         migrates: &[],
-        purpose: "The sync protocol's one step: what is the converged state of this edit document pair? LWW merge per record id plus tombstones (the terminal authority is the agency scheduling system — propose, review, accept), then drafts transition to submitted with the host-passed clock. transit-sync is the domain library; the module is stateless — document storage is the host's, and validation against the network is every model-side module's load_edits answer, never this one's.",
+        purpose: "What is the converged state of this edit document? sync_edits: LWW merge per record id plus tombstones (the terminal authority is the agency scheduling system — propose, review, accept), the receive path clamping client clocks to the host-passed now_ms (D-56), then drafts transition to submitted; the answer carries the canonical document bytes and their hash, so a host stores exact bytes and never mints identity. read_edits migrates a received document at receive; compact_edits is the D-57 tombstone-retention commit. transit-sync is the domain library; the module is stateless — document storage is the host's (the -store, docs/FORMATS.md), and validation against the network is every model-side module's load_edits answer, never this one's.",
         op_docs: &[
             ("sync_edits", "Merge the client's edit document with the server's (LWW per record id — the newer updated_at wins, tombstones propagate), then transition drafts to submitted (rev bumped, now_ms stamped). The answer is the converged document; the client adopts it wholesale. The host owns both documents and the clock."),
         ],

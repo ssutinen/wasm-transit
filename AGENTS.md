@@ -82,6 +82,8 @@ Where the detail lives:
 - `docs/CONVENTIONS.md` — gotchas, Rust/wasm/ops and frontend
 - `docs/TESTING.md` — the testing expectations and the dogfood-QA
   rules
+- `docs/FORMATS.md` — the sync store's at-rest formats (blobs,
+  envelopes, pointer logs) and the invariants JSON Schema cannot say
 - `docs/QA-FINDINGS.md` — the open real-data findings (defects,
   op/UI/data gaps), each pinned; deleted when fixed
 - `docs/DECISIONS.md` — the questions for the user and their
@@ -116,12 +118,17 @@ just e2e                   # the browser runner (Playwright, builds first) — U
 just check                 # both runners — changes touching both sides
 just types                 # regenerate TS bindings (gitignored; build runs it)
 just serve [feed.zip [streets.geojson ["Publisher" [addr]]]]   # sync server on :8080
+                           # STORE=dir adds the durable sync store (-store; blobs +
+                           # pointers under dir, docs/FORMATS.md)
 just dev                   # vite hot reload + server alongside
 just geocoder-build        # once: a local Pelias (portland-metro) in .pelias/
 just geocoder              # start it on :4000 (GEOCODER=http://127.0.0.1:4000
                            # just serve|dev proxies it at /geocode); geocoder-stop
 just fixtures              # regenerate the e2e GTFS fixture
 just soak                  # real-data soak (COUNTY_GEOJSON=… county roads)
+just spec                  # OPTIONAL: TLC model-check of the sync store engine
+                           # (server/store/store.tla) — only for changes touching the sync
+                           # engine; needs Java 11+ + tla2tools.jar, never part of `just test`
 just perf                  # browser perf baselines on the real feed — reports, never
                            # gates (docs/TESTING.md, "Performance baselines")
 ```
@@ -129,7 +136,16 @@ just perf                  # browser perf baselines on the real feed — reports
 Toolchains live in `~/.cargo/bin` and `~/.local/bin` (rustc, pmtiles,
 just, go at `~/.local/go/bin`) — export PATH if a shell lacks them.
 Installs (toolchains, release binaries) are the user's job;
-cargo/npm/go module fetches are fine.
+cargo/npm/go module fetches are fine. Java 11+ and
+`~/bin/tla2tools.jar` are the same and OPTIONAL — only `just spec`
+uses them, never in `just test`'s path. On an immutable desktop
+(Fedora Atomic) either keep them in the home directory (a Temurin
+tarball under `~/.local`, symlinked into `~/.local/bin`) or use a
+toolbox: `sudo dnf install java-21-openjdk` inside the container —
+the jar needs no copy, toolbox shares $HOME, so `~/bin/tla2tools.jar`
+is already there; run `just spec` via `toolbx enter` or
+`toolbx run -c <name> bash -lc 'just spec'`. Don't rpm-ostree-layer
+them onto the base.
 
 ## Architecture
 

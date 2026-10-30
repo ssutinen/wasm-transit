@@ -90,7 +90,7 @@ func TestSyncRoundTrip(t *testing.T) {
 		Records []map[string]any `json:"records"`
 	}
 	if err := host.Invoke(ctx, map[string]any{
-		"op": "sync_edits",
+		"op":     "sync_edits",
 		"client": []any{record("draft", 1, 1)}, "server": []any{}, "now_ms": 1000,
 	}, &resp); err != nil {
 		t.Fatalf("sync_edits: %v", err)
@@ -107,7 +107,7 @@ func TestSyncRoundTrip(t *testing.T) {
 		Records []map[string]any `json:"records"`
 	}
 	if err := host.Invoke(ctx, map[string]any{
-		"op": "sync_edits",
+		"op":     "sync_edits",
 		"client": []any{record("accepted", 1, 1)},
 		"server": []any{record("retired", 3, 2)}, "now_ms": 2000,
 	}, &lww); err != nil {
