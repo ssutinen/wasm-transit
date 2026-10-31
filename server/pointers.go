@@ -190,6 +190,17 @@ func (s *server) handlePointerLog(w http.ResponseWriter, r *http.Request, name s
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Writer identities leave the store only for audit-granted callers
+	// (auth on); the log stays redacted for everyone else.
+	canAudit := true
+	if v := r.Context().Value(auditKey); v != nil {
+		canAudit, _ = v.(bool)
+	}
+	if !canAudit {
+		for i := range entries {
+			entries[i].Writer = ""
+		}
+	}
 	head, _, _ := s.store.Head(name)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -218,10 +229,7 @@ func (s *server) handlePointerPost(w http.ResponseWriter, r *http.Request, name 
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	writer := r.Header.Get("X-Writer")
-	if writer == "" {
-		writer = "anonymous"
-	}
+	writer := writerOf(r, "anonymous")
 	nowMs := time.Now().UnixMilli()
 
 	head, found, err := s.store.Head(name)
@@ -328,6 +336,15 @@ func (s *server) handleBlob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Server-internal config documents are never served to clients:
+	// the policy blob is the authorization structure itself (roles,
+	// rules, pointers) — a client gets the manifest's policy_hash
+	// (opaque, for rotation detection), never the document. The log
+	// endpoint is the audited path to policy CHANGES, gated by auth.
+	if env.Kind == "policy" {
+		http.NotFound(w, r)
 		return
 	}
 	etag := `"` + hash + `"`

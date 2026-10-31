@@ -31,7 +31,7 @@ invariants the schema cannot say.
 ```
 
 - `kind` — one of `network_document`, `edit_records`,
-  `diversion_draft`, `manifest`, `plans`.
+  `diversion_draft`, `manifest`, `plans`, `policy`.
 - `schema_version` — the payload schema's version; a reader pins a
   version and ignores newer ones, and a writer bumps it deliberately.
   Migrations happen at receive, never at read.
@@ -52,8 +52,13 @@ commit:
 - `from` is the hash the writer last saw; a commit appends only when
   the last `to` equals it (empty `from` = the pointer must not exist
   yet). A failed CAS changes nothing.
-- `writer`/`policy` are reserved for cap-authz; today `writer` is a
-  label and `policy` is null.
+- `writer` is the verified JWT `sub` when authentication is on (D-58),
+  else the caller's label (`X-Writer`, default `anonymous`). It leaves
+  the server only through the log endpoint, and only to `audit`-granted
+  callers (redacted otherwise). `policy` (the field) stays null — the
+  policy itself is the `policy` pointer's blob (D-61), and that blob is
+  never served over HTTP (`/blobs` 404s kind `policy`); clients get the
+  caller's projection from `GET /permissions` instead.
 - `<store>/lock` is an flock held for the process's lifetime, so two
   server processes on one store cannot interleave a commit.
 

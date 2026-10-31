@@ -271,13 +271,28 @@ const MODULES: &[ModuleSpec] = &[
     ModuleSpec {
         id: "sync",
         file: "cap_sync.wasm",
-        ops: &["sync_edits"],
+        ops: &["sync_edits", "read_edits", "compact_edits"],
         consumes: &[],
         speaks: &[("operator_edits", &[1])],
         migrates: &[],
         purpose: "What is the converged state of this edit document? sync_edits: LWW merge per record id plus tombstones (the terminal authority is the agency scheduling system — propose, review, accept), the receive path clamping client clocks to the host-passed now_ms (D-56), then drafts transition to submitted; the answer carries the canonical document bytes and their hash, so a host stores exact bytes and never mints identity. read_edits migrates a received document at receive; compact_edits is the D-57 tombstone-retention commit. transit-sync is the domain library; the module is stateless — document storage is the host's (the -store, docs/FORMATS.md), and validation against the network is every model-side module's load_edits answer, never this one's.",
         op_docs: &[
-            ("sync_edits", "Merge the client's edit document with the server's (LWW per record id — the newer updated_at wins, tombstones propagate), then transition drafts to submitted (rev bumped, now_ms stamped). The answer is the converged document; the client adopts it wholesale. The host owns both documents and the clock."),
+            ("sync_edits", "Merge the client's edit document with the server's (LWW per record id — the newer updated_at wins, tombstones propagate), then transition drafts to submitted (rev bumped, now_ms stamped). The receive path clamps the client's updated_at to now_ms first (D-56). The answer is the converged document — records, the canonical document bytes, and document_hash; the client adopts it wholesale. The host owns both documents and the clock."),
+            ("read_edits", "Migrate-at-receive: parse a received or stored document under the current schema — serde defaults fill what age removed, malformed records are dropped and counted (never wedging the document). The answer carries the migrated records, the dropped count, the schema_version, and the canonical document + hash for seeding a store pointer."),
+            ("compact_edits", "The D-57 tombstone-retention commit: drop records that are retired AND older than now_ms - horizon_ms; in-force records are never dropped. Answer: the compacted records, the canonical document + hash, and the dropped count."),
+        ],
+    },
+    ModuleSpec {
+        id: "authz",
+        file: "cap_authz.wasm",
+        ops: &["authorize", "effective"],
+        consumes: &[],
+        speaks: &[("policy", &[1])],
+        migrates: &[],
+        purpose: "Authorization: may this identity perform this action on this pointer? Authentication is the IdP's — the host verifies the JWT (JWKS or a pinned key, RS256/ES256 only, iss/aud/exp checked, D-60) and reads the roles claim at the configured path (D-59). This module owns only the decisions: authorize evaluates the POLICY document the host passes per call (the store's policy pointer, seeded from a -policy file at first boot, changed by audited CAS commits — D-61) and answers fail-closed — no policy, no subject, no matching rule is a deny, never an allow; the verdict never depends on rule order. effective projects the policy onto ONE identity — the caller's roles and merged capabilities, never other roles or rules — which is all a client may learn (GET /permissions). The policy blob itself is never served to clients. transit-authz is the domain library; the module is stateless, like cap-plans. Assemble for any server whose writes must be role-gated.",
+        op_docs: &[
+            ("authorize", "The one question: {identity: {sub, roles}, action: \"read\"|\"write\"|\"audit\", pointer, policy} → {decision: {allow, matched_rule, reason}}. A rule matches when the identity holds one of its roles AND its pointers/actions match (\"*\" or empty = all; empty roles = never). Default policy shape: public read, authenticated write on the operator documents (D-58); the pointer log additionally needs read, and shows writer identities only with an audit rule."),
+            ("effective", "The policy as it applies to THIS identity: {identity, policy} → {roles, capabilities: [{pointer, actions}]} — matching rules merged per pointer, sorted, wildcards symbolic. The client's view (GET /permissions); contains nothing about other users or roles."),
         ],
     },
     ModuleSpec {
@@ -1647,9 +1662,74 @@ fn example_for(
             draft[0].status = transit_sync::EditStatus::Draft;
             let now_ms: u64 = 1_770_000_000_000;
             let records = transit_sync::submit(transit_sync::merge(&draft, &[]), now_ms);
+            let document = serde_json::to_string(&records).unwrap();
+            let document_hash = cap_abi::canonical_hash(&records).unwrap();
             (
                 json!({ "op": "sync_edits", "client": draft, "server": [], "now_ms": now_ms }),
-                json!({ "ok": { "op": "sync_edits", "records": records } }),
+                json!({ "ok": { "op": "sync_edits", "records": records, "document": document, "document_hash": document_hash } }),
+            )
+        }
+        ("sync", "read_edits") => {
+            let stored = serde_json::to_value(dispatch_fixture_edits()).unwrap();
+            let (records, dropped) = transit_sync::sanitize(&stored);
+            let document = serde_json::to_string(&records).unwrap();
+            let document_hash = cap_abi::canonical_hash(&records).unwrap();
+            (
+                json!({ "op": "read_edits", "document": stored }),
+                json!({ "ok": { "op": "read_edits", "records": records, "dropped": dropped, "schema_version": transit_sync::SCHEMA_VERSION, "document": document, "document_hash": document_hash } }),
+            )
+        }
+        ("sync", "compact_edits") => {
+            let mut old = dispatch_fixture_edits();
+            old[0].status = transit_sync::EditStatus::Retired;
+            old[0].updated_at = 1_000;
+            let now_ms: u64 = 1_770_000_000_000;
+            let horizon_ms: u64 = 90 * 24 * 3600 * 1000;
+            let (records, dropped) = transit_sync::compact(&old, now_ms, horizon_ms);
+            let document = serde_json::to_string(&records).unwrap();
+            let document_hash = cap_abi::canonical_hash(&records).unwrap();
+            (
+                json!({ "op": "compact_edits", "records": old, "now_ms": now_ms, "horizon_ms": horizon_ms }),
+                json!({ "ok": { "op": "compact_edits", "records": records, "document": document, "document_hash": document_hash, "dropped": dropped } }),
+            )
+        }
+        // The authorization capability's example computes the REAL
+        // fail-closed decision through the same library the module
+        // dispatches through.
+        ("authz", "authorize") => {
+            let policy = transit_authz::Policy::current(vec![transit_authz::Rule {
+                name: "ops-write-edits".into(),
+                roles: vec!["dispatcher".into()],
+                pointers: vec!["edits".into()],
+                actions: vec!["write".into()],
+            }]);
+            let identity = transit_authz::Identity { sub: "dispatcher-7".into(), roles: vec!["dispatcher".into()] };
+            let decision = transit_authz::authorize(&policy, &identity, transit_authz::Action::Write, "edits");
+            (
+                json!({ "op": "authorize", "identity": identity, "action": "write", "pointer": "edits", "policy": policy }),
+                json!({ "ok": { "op": "authorize", "decision": decision } }),
+            )
+        }
+        ("authz", "effective") => {
+            let policy = transit_authz::Policy::current(vec![
+                transit_authz::Rule {
+                    name: "ops-write-edits".into(),
+                    roles: vec!["dispatcher".into()],
+                    pointers: vec!["edits".into()],
+                    actions: vec!["read".into(), "write".into()],
+                },
+                transit_authz::Rule {
+                    name: "admin-all".into(),
+                    roles: vec!["admin".into()],
+                    pointers: vec!["*".into()],
+                    actions: vec!["*".into()],
+                },
+            ]);
+            let identity = transit_authz::Identity { sub: "dispatcher-7".into(), roles: vec!["dispatcher".into()] };
+            let effective = transit_authz::effective(&policy, &identity);
+            (
+                json!({ "op": "effective", "identity": identity, "policy": policy }),
+                json!({ "ok": { "op": "effective", "effective": effective } }),
             )
         }
         // The plan-chain capability's examples compute REAL answers

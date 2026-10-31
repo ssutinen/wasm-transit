@@ -77,11 +77,7 @@ func (s *server) handleStoreEdits(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		writer := r.Header.Get("X-Writer")
-		if writer == "" {
-			writer = "anonymous"
-		}
-		document, hash, err := s.commitEdits(json.RawMessage(body), writer)
+		document, hash, err := s.commitEdits(json.RawMessage(body), writerOf(r, "anonymous"))
 		if err != nil {
 			if strings.Contains(err.Error(), "moved") {
 				http.Error(w, "conflict: the edit document moved, retry", http.StatusConflict)

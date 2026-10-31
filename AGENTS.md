@@ -120,6 +120,9 @@ just types                 # regenerate TS bindings (gitignored; build runs it)
 just serve [feed.zip [streets.geojson ["Publisher" [addr]]]]   # sync server on :8080
                            # STORE=dir adds the durable sync store (-store; blobs +
                            # pointers under dir, docs/FORMATS.md)
+                           # OIDC_ISSUER/OIDC_JWKS_URL/OIDC_AUDIENCE/OIDC_KEY/POLICY=…
+                           # turn on JWT auth + policy (D-58..D-61; see
+                           # docs/units/cap-authz.md)
 just dev                   # vite hot reload + server alongside
 just geocoder-build        # once: a local Pelias (portland-metro) in .pelias/
 just geocoder              # start it on :4000 (GEOCODER=http://127.0.0.1:4000
@@ -181,7 +184,7 @@ transit-streets  THE streets document (canonical: its hash is the streets', not 
                  the graph over it (snap, route), and walking (the walk table between stops,
                  a point's walks to the stops near it)
 cap-abi          the capability seam (ABI macro, manifest, validator, gen-manifest)
-cap-gtfs cap-router cap-analysis cap-network cap-rt cap-board cap-runcut cap-calendar cap-directory cap-streets cap-sync cap-plans cap-author cap-divert
+cap-gtfs cap-router cap-analysis cap-network cap-rt cap-board cap-runcut cap-calendar cap-directory cap-streets cap-sync cap-authz cap-plans cap-author cap-divert
                  the capability modules (docs/ARCHITECTURE.md, bus section)
 server/          Go + wazero host over cap-sync, cap-network and cap-streets (the
                  network, streets and walk table it publishes) and the proxies

@@ -109,6 +109,24 @@ how far, how many results) is the deployment's policy,
 `server/geocoder.json` (`-geocoder-policy`); the manifest lists the
 geocoder and its policy under `services`.
 
+## Authentication and the sync store
+
+`STORE=./store just serve …` turns on the durable sync store:
+content-addressed blobs + CAS'd pointers under `./store` (`/pointers`,
+`/blobs`, store-backed `/edits` and `/manifest`; `docs/FORMATS.md`).
+
+With an OIDC IdP, writes authenticate: the server verifies bearer JWTs
+(JWKS or a pinned key, RS256/ES256 only) and asks the `cap-authz`
+module over a policy document (the store's `policy` pointer, seeded
+from a `-policy` file at first boot) — reads stay public, writes need a
+role the policy grants (D-58..D-61). Via `just serve`:
+
+```
+OIDC_ISSUER=https://idp.example OIDC_JWKS_URL=https://idp.example/jwks \
+  OIDC_AUDIENCE=transit-server POLICY=./policy.json STORE=./store \
+  just serve path/to/gtfs.zip
+```
+
 ## Live feeds
 
 The ride-now UI (`/ride-now.html`) and the stop display

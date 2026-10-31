@@ -38,7 +38,7 @@ the rest of the work can go ahead while the decision is reviewed.
   and the `Blocked: D-N` lines are removed. A later answer that
   reverses one is a new entry naming the entry it replaces; the old
   entry's state says so.
-- IDs are never reused; the next new decision is **D-58**.
+- IDs are never reused; the next new decision is **D-62**.
 
 ## Summary
 
@@ -98,6 +98,10 @@ the rest of the work can go ahead while the decision is reviewed.
 | D-55 | Which members does a service group count on a day? | unanswered | QAF-91 |
 | D-56 | Whose clock is the LWW clock? | encoded | the receive path of sync-persistence |
 | D-57 | How long does a tombstone live? | encoded | the GC/retention section of sync-persistence |
+| D-58 | Which endpoints require a token by default? | decided | nothing |
+| D-59 | Which JWT claim carries the roles? | decided | nothing |
+| D-60 | How are JWTs verified (JWKS vs pinned key)? | decided | nothing |
+| D-61 | Where does the authz policy live and how is it changed? | decided | nothing |
 
 ## The trip model
 
@@ -1129,6 +1133,62 @@ Pinned by: `transit-sync` law test
 `compact_drops_only_retired_records_past_the_horizon`, cap-sync
 `compact_edits` dispatch test, and the store GC test.
 Blocks: the GC/retention section of `docs/units/sync-persistence.md`.
+
+## Authentication and authorization
+
+### D-58 — Which endpoints require a token by default?
+State: Decided.
+Answer: 2026-10-30 — "Public read, auth'd write": GET on /manifest,
+/network, /streets, /walks, /blobs, /pointers and /edits stays public
+(the rider-facing deployment shape); POST /edits and POST
+/pointers/* require a role with write on that pointer. The policy
+document can refine per pointer later.
+Context: with -store landed, writes are the multi-writer surface; reads
+publish documents. A deployment that must not expose reads can put a
+read rule behind auth in the policy.
+Options: public read / auth'd write (chosen); everything authenticated;
+only edits+pointers protected.
+Blocks: nothing.
+
+### D-59 — Which JWT claim carries the roles?
+State: Decided.
+Answer: 2026-10-30 — "Configurable claim path": a `-oidc-roles-claim`
+flag (dotted path into the payload, e.g. `roles` or
+`realm_access.roles` for Keycloak), default `roles`, value a JSON
+array of strings. Works with any IdP.
+Context: the policy matches role strings; the claim's location is the
+IdP's, so the server must be told where to look rather than hard-code
+one vendor's shape.
+Options: configurable path (chosen); OAuth2 scope/scp only; fixed
+top-level `roles`.
+Blocks: nothing.
+
+### D-60 — How are JWTs verified (JWKS vs pinned key)?
+State: Decided.
+Answer: 2026-10-30 — "Both, JWKS preferred": with `-oidc-jwks-url` set
+the server fetches the IdP's JWKS, caches by `kid`, refetches on an
+unknown `kid`; else `-oidc-key <pem>` pins one public key. RS256 and
+ES256 only — `alg: none` and HS* are rejected (the IdP signs with a
+private key; symmetric algs would let anyone mint tokens). iss must
+equal `-oidc-issuer`, aud must contain `-oidc-audience`, exp/nbf with
+60 s leeway.
+Context: authentication is the IdP's; the server only verifies.
+Options: JWKS only; pinned key only; both (chosen).
+Blocks: nothing.
+
+### D-61 — Where does the authz policy live and how is it changed?
+State: Decided.
+Answer: 2026-10-30 — "Store pointer, seeded from file": the policy is a
+document on the store (kind `policy`), seeded from a `-policy <file>`
+flag at first boot when the pointer is absent; later changes are
+authenticated CAS commits on the `policy` pointer (audited in the log)
+needing a role with write on it. Bootstrap-safe: no chicken-and-egg.
+Context: the policy is data, so per the bus laws it is a document
+addressed by hash, and cap-authz answers authorize/deny over it
+fail-closed (no policy, no valid token, or no matching rule → deny).
+Options: store pointer seeded from file (chosen); file re-read per
+request (not audited); store pointer only (needs break-glass bootstrap).
+Blocks: nothing.
 
 ## Agency data
 

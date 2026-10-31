@@ -1174,6 +1174,58 @@ assert(clamped.records[0].updated_at === 2000, "a future-dated record is clamped
 const reclamped = sync.invoke({ op: "sync_edits", client: [clamped.records[0]], server: [], now_ms: 3000 });
 assert(reclamped.records[0].updated_at === 2000, "an already-clamped stamp is untouched (idempotent)");
 
+// The authorization flow — the one question: may this identity do this
+// on this pointer? Fail-closed: a matching rule allows, anything else
+// denies (empty policy, missing role, wrong action/pointer).
+assert(byId.authz, "manifest advertises the authz capability");
+const authz = shell(loadModule(byId.authz));
+const policy = {
+  schema_version: 1,
+  rules: [
+    { name: "ops-write-edits", roles: ["dispatcher"], pointers: ["edits"], actions: ["write"] },
+    { name: "admin-all", roles: ["admin"], pointers: ["*"], actions: ["*"] },
+  ],
+};
+const allowed = authz.invoke({
+  op: "authorize",
+  identity: { sub: "dispatcher-7", roles: ["dispatcher"] },
+  action: "write", pointer: "edits", policy,
+});
+assert(allowed.decision.allow === true && allowed.decision.matched_rule === "ops-write-edits", "the matching rule allows");
+const denied = authz.invoke({
+  op: "authorize",
+  identity: { sub: "rider-1", roles: ["rider"] },
+  action: "write", pointer: "edits", policy,
+});
+assert(denied.decision.allow === false, "no matching rule denies");
+const noPolicy = authz.invoke({
+  op: "authorize",
+  identity: { sub: "admin-1", roles: ["admin"] },
+  action: "write", pointer: "edits", policy: { schema_version: 1, rules: [] },
+});
+assert(noPolicy.decision.allow === false, "empty policy is fail-closed");
+const badAction = authz.raw({
+  op: "authorize",
+  identity: { sub: "a", roles: ["admin"] },
+  action: "drop", pointer: "edits", policy,
+});
+assert(badAction.error && badAction.error.includes("unknown action"), "an unknown action is an error, never an allow");
+
+// The projection: the policy as it applies to ONE identity — its roles
+// and merged capabilities only, never other roles or rules.
+const eff = authz.invoke({
+  op: "effective",
+  identity: { sub: "dispatcher-7", roles: ["dispatcher"] },
+  policy,
+});
+assert(
+  eff.effective.roles.length === 1 &&
+    eff.effective.capabilities.length === 1 &&
+    eff.effective.capabilities[0].pointer === "edits" &&
+    !JSON.stringify(eff.effective).includes("admin"),
+  "effective projects only the caller's own capabilities",
+);
+
 // The plan-chain flow — which pick governs: the spring pick in
 // force on the fixture Friday, the fall pick after it, the windows
 // derived (never stored), and the chain validating clean.

@@ -118,6 +118,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "transit-analysis",
+ "transit-authz",
  "transit-codec",
  "transit-dispatch",
  "transit-live",
@@ -157,6 +158,17 @@ dependencies = [
  "serde_json",
  "sha2",
  "transit-network",
+ "ts-rs",
+]
+
+[[package]]
+name = "cap-authz"
+version = "0.1.0"
+dependencies = [
+ "cap-abi",
+ "serde",
+ "serde_json",
+ "transit-authz",
  "ts-rs",
 ]
 
@@ -1088,6 +1100,16 @@ dependencies = [
  "transit-network",
  "ts-rs",
  "zip",
+]
+
+[[package]]
+name = "transit-authz"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "ts-rs",
 ]
 
 [[package]]

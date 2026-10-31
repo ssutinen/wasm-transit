@@ -39,6 +39,7 @@ archive — nothing here records what is finished.
 | [host-discipline.md](host-discipline.md) | the composition layer: one op caller, flow maps as data, the journal, replay |
 | [wire-time-assembly.md](wire-time-assembly.md) | per-user selection over the manifest; layouts as documents |
 | [sync-persistence.md](sync-persistence.md) | self-describing blobs + pointers, pointer CAS, the store reflog, TLC-checked, generated schemas + `docs/FORMATS.md` |
+| [cap-authz.md](cap-authz.md) | JWT verification at the server, the policy document on the store, cap-authz fail-closed |
 | [runtime-cost-gate.md](runtime-cost-gate.md) | a ratchet on per-module memory and registration time |
 | [module-runtime.md](module-runtime.md) | bounded registries (a kernel eviction op) and off-thread instantiation |
 | [streets-model.md](streets-model.md) | streets as a model document: serving it, the bus profile, walking for riders, drawing on streets, the geography release |
@@ -66,8 +67,6 @@ before starting it.
   crystallizes the chained-session format first.
 - **Fuel metering** in the runner, once it may point at untrusted
   registry entries (the wall-clock guard is the stopgap).
-- **cap-authz** — a policy document, server-side assembly,
-  fail-closed; the validator's scope check.
 
 The feature direction (what the software becomes) is
 `docs/ROADMAP.md`; the real-data findings are

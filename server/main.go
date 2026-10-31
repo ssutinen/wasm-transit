@@ -47,6 +47,13 @@ func main() {
 	editsPath := flag.String("edits", "", "path to persist the edit document (JSON); empty = in-memory only (legacy mode; with -store it seeds the edits pointer once)")
 	storeDir := flag.String("store", "", "directory of the durable sync store (blobs + pointers, docs/FORMATS.md): enables /pointers, /blobs and store-backed /edits and /manifest; empty = legacy mode")
 	retentionDays := flag.Int("retention-days", 90, "tombstone retention horizon (days) for the store's D-57 compaction commits")
+	authzWasm := flag.String("authz-wasm", "../web/pkg/cap_authz.wasm", "the authorization capability module (cap-authz) hosted when OIDC is configured")
+	oidcIssuer := flag.String("oidc-issuer", "", "expected JWT iss (D-60); with any -oidc flag this turns authentication on")
+	oidcJWKS := flag.String("oidc-jwks-url", "", "the IdP's JWKS URL: keys are fetched, cached by kid, refetched on an unknown kid (rate-limited)")
+	oidcAud := flag.String("oidc-audience", "", "expected JWT aud (string or array member)")
+	oidcKey := flag.String("oidc-key", "", "pinned PEM public key for JWT verification (used when -oidc-jwks-url is empty)")
+	oidcRoles := flag.String("oidc-roles-claim", "roles", "dotted JWT claim path holding the roles string array (D-59)")
+	policyFile := flag.String("policy", "", "path to the authorization policy document (JSON): seeds the store's policy pointer at first boot (D-61); with no -store it is the policy")
 	geocoderURL := flag.String("geocoder", "", "base URL of a Pelias geocoder (e.g. http://127.0.0.1:4000): enables /geocode/{autocomplete,search,reverse} and lists it in the manifest's services")
 	geocoderPolicy := flag.String("geocoder-policy", "geocoder.json", "the deployment's geocoder query policy (Pelias parameters per op), applied by the proxy")
 	flag.Parse()
@@ -76,8 +83,26 @@ func main() {
 		}
 		s.store = st
 		s.seedStore(*editsPath)
+		s.seedPolicy(*policyFile)
 		s.maybeCompactEdits()
 		log.Printf("sync store open: %s", *storeDir)
+	}
+	if *oidcIssuer != "" || *oidcJWKS != "" || *oidcKey != "" {
+		if *oidcJWKS != "" && (*oidcIssuer == "" || *oidcAud == "") {
+			log.Fatal("-oidc-jwks-url needs -oidc-issuer and -oidc-audience")
+		}
+		a, err := loadAuthz(ctx, oidcConfig{
+			issuer: *oidcIssuer, jwksURL: *oidcJWKS, audience: *oidcAud,
+			keyFile: *oidcKey, rolesClaim: *oidcRoles,
+		}, *authzWasm, *policyFile)
+		if err != nil {
+			log.Fatalf("authz: %v", err)
+		}
+		s.authz = a
+		log.Printf("auth ON: iss=%q aud=%q jwks=%q key=%q roles-claim=%q (authz module %s)",
+			*oidcIssuer, *oidcAud, *oidcJWKS, *oidcKey, a.cfg.rolesClaim, a.wasm.Hash())
+	} else {
+		log.Printf("auth OFF: no -oidc flags — writes are UNAUTHENTICATED (dev only; bind localhost)")
 	}
 	if *geocoderURL != "" {
 		if s.geocoder, err = loadGeocoder(*geocoderURL, *geocoderPolicy); err != nil {
@@ -104,8 +129,9 @@ func main() {
 	mux.HandleFunc("/network", s.handleNetwork)
 	mux.HandleFunc("/streets", s.handleStreets)
 	mux.HandleFunc("/walks", s.handleWalks)
-	mux.HandleFunc("/edits", s.handleEdits)
-	mux.HandleFunc("/pointers/", s.handlePointers)
+	mux.HandleFunc("/edits", s.protectWrite(func(*http.Request) string { return "edits" }, s.handleEdits))
+	mux.HandleFunc("/pointers/", s.protectWrite(pointerNameOf, s.handlePointers))
+	mux.HandleFunc("/permissions", s.requireAuth(s.handlePermissions))
 	mux.HandleFunc("/blobs/", s.handleBlob)
 	mux.HandleFunc("/geocode/", s.handleGeocode)
 	mux.HandleFunc("/", s.handleStatic)
@@ -134,6 +160,10 @@ type server struct {
 	// pointers. nil = legacy mode.
 	store         *store.Store
 	retentionDays int
+
+	// Authorization state (nil = auth off, dev only): the IdP config,
+	// the hosted cap-authz module, and the policy source.
+	authz *authzState
 
 	// The manifest pointer's last committed key (store mode): the
 	// manifest is re-committed when the published set changes.
@@ -210,6 +240,8 @@ type Manifest struct {
 	StreetsHash string  `json:"streets_hash,omitempty"` // the streets document GET /streets serves
 	WalksHash   string  `json:"walks_hash,omitempty"`   // the walk table GET /walks serves
 	WasmHash    string  `json:"wasm_hash"`              // sha256 of the sync module this server runs
+	AuthzHash   string  `json:"authz_hash,omitempty"`   // sha256 of the cap-authz module, when auth is on
+	PolicyHash  string  `json:"policy_hash,omitempty"`  // the store's policy pointer head, store mode (D-61)
 	GeneratedAt int64   `json:"generated_at"`
 	Publisher   *string `json:"publisher,omitempty"`
 	// The external services this deployment offers, by name — a
@@ -258,6 +290,14 @@ func (s *server) buildManifest() (Manifest, error) {
 	if s.geocoder != nil {
 		manifest.Services = map[string]Service{"geocoder": s.geocoder.service()}
 	}
+	if s.authz != nil {
+		manifest.AuthzHash = s.authz.wasm.Hash()
+	}
+	if s.store != nil {
+		if head, found, err := s.store.Head("policy"); err == nil && found {
+			manifest.PolicyHash = head.Hash
+		}
+	}
 	return manifest, nil
 }
 
@@ -266,7 +306,7 @@ func (s *server) buildManifest() (Manifest, error) {
 func manifestKeyOf(m Manifest) string {
 	services, _ := json.Marshal(m.Services)
 	sum := sha256.Sum256([]byte(strings.Join([]string{
-		m.WasmHash, m.NetworkHash, m.FeedHash, orEmpty(m.FeedVersion),
+		m.WasmHash, m.AuthzHash, m.PolicyHash, m.NetworkHash, m.FeedHash, orEmpty(m.FeedVersion),
 		m.StreetsHash, m.WalksHash, orEmpty(m.Publisher), string(services),
 	}, "|")))
 	return hex.EncodeToString(sum[:])

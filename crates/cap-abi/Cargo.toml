@@ -39,6 +39,10 @@ transit-streets = { path = "../transit-streets" }
 # answers (merge + submit; resolve/validate/periods) through the
 # same libraries the modules dispatch through.
 transit-plans = { path = "../transit-plans" }
+# …and the authorization capability's example computes a REAL
+# fail-closed decision through the same library the module dispatches
+# through.
+transit-authz = { path = "../transit-authz" }
 
 [dev-dependencies]
 proptest = "1"

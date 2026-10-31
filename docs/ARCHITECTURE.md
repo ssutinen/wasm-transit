@@ -407,6 +407,14 @@ transit-streets THE streets model. `model.rs`: the streets document
                 and footways (OSM), not one whose classes cannot tell
                 a freeway from an arterial (QAF-85). Open work:
                 `docs/units/streets-model.md`.
+cap-authz       The authorization capability: may this identity
+                perform this action on this pointer? One op
+                (`authorize`), stateless like cap-plans — the host
+                verifies the IdP's JWT and pushes the policy document
+                per call; the verdict is fail-closed and never depends
+                on rule order (transit-authz is the library, property-
+                tested). The policy is a store document (kind `policy`,
+                D-61).
 cap-sync        The sync capability: the converged state of an edit
                 document — its lifecycle facets: sync_edits (LWW merge
                 + the submit transition, with the receive path
@@ -545,6 +553,19 @@ Its HTTP surface:
   (mtime-checked). A client registers the network with
   `load_network` and refuses it unless the module answers the
   pinned hash (`servedNetwork` in `src/uis/kit.ts`).
+- **Authentication/authorization** (D-58..D-61): with any `-oidc-*`
+  flag set, the server verifies bearer JWTs — JWKS (`-oidc-jwks-url`,
+  cached by `kid`, refetched on unknown kid) or a pinned PEM
+  (`-oidc-key`), RS256/ES256 only, iss/aud exact, exp/nbf with leeway —
+  and asks the hosted cap-authz module (`-authz-wasm`) over the policy
+  document before any write: reads stay public (D-58), writes
+  (`POST /edits`, `POST /pointers/*`) need a role the policy grants
+  write on that pointer. 401 bad/missing token, 403 denied; the
+  verified `sub` is the store log's `writer`. The policy is the store's
+  `policy` pointer, seeded from `-policy <file>` at first boot (D-61);
+  later changes are authenticated CAS commits. No `-oidc-*` = auth off,
+  logged loudly (dev only). `STORE`/`OIDC_*`/`POLICY` env vars pass the
+  flags through `just serve`/`just dev`.
 - `/edits` — the edit document: `POST` a client document, receive
   the LWW-merged result (cap-sync's `sync_edits`, with the receive
   path clamping client timestamps to the server clock, D-56); `GET`
@@ -556,9 +577,14 @@ Its HTTP surface:
   `GET /pointers/{name}`, `GET /pointers/{name}/log?since=<hash>`
   (delta sync over the append-only log), `POST /pointers/{name}`
   (`{from, …}` → 200 + new head, 409 + current on conflict), and
-  `GET /blobs/{hash}` (raw bytes, ETag the hash, envelope in headers).
-  `GET /manifest` serves the `manifest` pointer's blob, re-committed
-  when the published feed, streets, module, or services change.
+  `GET /blobs/{hash}` (raw bytes, ETag the hash, envelope in headers —
+  except kind `policy` blobs, which are never served: 404). `GET
+  /manifest` serves the `manifest` pointer's blob, re-committed when the
+  published feed, streets, module, or services change. With auth on, the
+  log endpoint requires a read (an `audit` rule implies it) and redacts
+  `writer` unless audit is granted; `GET /permissions` (any valid token)
+  returns the caller's effective-permissions projection (cap-authz
+  `effective`) — the only client-readable form of the policy.
 
 `go test ./...` in `server/` proves the server runs the exact
 module bytes the manifest pins and answers what the browser does.

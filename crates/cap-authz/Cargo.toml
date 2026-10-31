@@ -1,0 +1,16 @@
+[package]
+name = "cap-authz"
+description = "The authorization capability: may this identity perform this action on this pointer? A pure, fail-closed decision over the policy document (transit-authz is the library; the host verifies the JWT and owns the clock)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]  # rlib: integration tests link the crate natively
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+ts-rs = { workspace = true }
+transit-authz = { path = "../transit-authz" }
+cap-abi = { path = "../cap-abi" }

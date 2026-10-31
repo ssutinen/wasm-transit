@@ -321,6 +321,7 @@ pub enum DocumentKind {
     DiversionDraft,
     Manifest,
     Plans,
+    Policy,
 }
 
 /// The typed envelope stored next to every blob: the hash names the
@@ -597,6 +598,7 @@ mod receive_tests {
             (DocumentKind::DiversionDraft, "diversion_draft"),
             (DocumentKind::Manifest, "manifest"),
             (DocumentKind::Plans, "plans"),
+            (DocumentKind::Policy, "policy"),
         ] {
             assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{name}\""));
         }

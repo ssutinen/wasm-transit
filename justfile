@@ -29,12 +29,13 @@ default:
 caps:
     #!/usr/bin/env bash
     set -e
-    cargo build --release -p cap-gtfs -p cap-router -p cap-analysis -p cap-network -p cap-rt -p cap-board -p cap-runcut -p cap-calendar -p cap-directory -p cap-streets -p cap-sync -p cap-plans -p cap-author -p cap-divert --target wasm32-unknown-unknown
+    cargo build --release -p cap-gtfs -p cap-router -p cap-analysis -p cap-network -p cap-rt -p cap-board -p cap-runcut -p cap-calendar -p cap-directory -p cap-streets -p cap-sync -p cap-authz -p cap-plans -p cap-author -p cap-divert --target wasm32-unknown-unknown
     cargo run --quiet -p cap-abi --bin gen-manifest
     mkdir -p web/pkg
     cp target/wasm32-unknown-unknown/release/cap_sync.wasm web/pkg/cap_sync.wasm
     cp target/wasm32-unknown-unknown/release/cap_network.wasm web/pkg/cap_network.wasm
     cp target/wasm32-unknown-unknown/release/cap_streets.wasm web/pkg/cap_streets.wasm
+    cp target/wasm32-unknown-unknown/release/cap_authz.wasm web/pkg/cap_authz.wasm
 
 # Publish the registry: gates first (the records report them), then
 # build and publish — immutable blobs, evidence records per
@@ -338,6 +339,14 @@ test: caps
     node tools/caps-run.mjs sync \
       --op '{"op":"sync_edits","client":[{"id":"e1","diversion":{"id":"d1","route_id":"10","direction_id":null,"first_kept_stop":"A","last_kept_stop":"B","skipped_stops":["C"],"detour":null,"added_secs":300,"start_date":"2026-10-23","end_date":"2026-10-23"},"status":"draft","rev":1,"updated_at":1}],"server":[],"now_ms":1000}' \
       | grep -q '"status":"submitted"'
+    # The authz capability's gate: fail-closed — a matching rule allows,
+    # an empty policy denies.
+    node tools/caps-run.mjs authz \
+      --op '{"op":"authorize","identity":{"sub":"d","roles":["dispatcher"]},"action":"write","pointer":"edits","policy":{"schema_version":1,"rules":[{"name":"ops","roles":["dispatcher"],"pointers":["edits"],"actions":["write"]}]}}' \
+      | grep -q '"allow":true'
+    node tools/caps-run.mjs authz \
+      --op '{"op":"authorize","identity":{"sub":"r","roles":["rider"]},"action":"write","pointer":"edits","policy":{"schema_version":1,"rules":[]}}' \
+      | grep -q '"allow":false'
     # The plan-chain capability's gate: which pick governs — the
     # spring pick in force, the fall pick taking over after it, and
     # the derived windows.
@@ -382,7 +391,7 @@ test: caps
     # transit-rt (rt updates number stops as the published feed does —
     # the import's Boundary). The router left the feed in U5 — it
     # plans over the network document and the effective day.
-    for crate in cap-analysis cap-board cap-runcut cap-calendar cap-directory cap-sync cap-plans cap-author cap-divert transit-analysis transit-dispatch transit-live; do
+    for crate in cap-analysis cap-board cap-runcut cap-calendar cap-directory cap-sync cap-authz cap-plans cap-author cap-divert transit-analysis transit-dispatch transit-live transit-authz; do
         for dep in transit-codec; do
             if awk '/^\[dev-dependencies\]/{exit} /^'"$dep"' =/{found=1} END{exit !found}' "crates/$crate/Cargo.toml" 2>/dev/null; then
                 echo "ARCH FAIL: $crate depends on $dep — the network is the core model; compose over the network document (crates/AGENTS.md, Law 1)"; exit 1
@@ -543,6 +552,13 @@ serve feed="" streets="" publisher="" addr="127.0.0.1:8080":
     if [ -n "{{ publisher }}" ]; then args+=(-publisher "{{ publisher }}"); fi
     if [ -n "${GEOCODER:-}" ]; then args+=(-geocoder "$GEOCODER"); fi
     if [ -n "${STORE:-}" ]; then args+=(-store "$STORE"); fi
+    # Auth (D-58..D-61): OIDC_* turns authentication on; POLICY seeds the
+    # store's policy pointer at first boot. Example:
+    # OIDC_ISSUER=https://idp.example OIDC_JWKS_URL=https://idp.example/jwks \
+    #   OIDC_AUDIENCE=transit-server POLICY=./policy.json STORE=./store just serve feed.zip
+    for v in OIDC_ISSUER OIDC_JWKS_URL OIDC_AUDIENCE OIDC_KEY OIDC_ROLES_CLAIM POLICY; do
+        if [ -n "${!v:-}" ]; then args+=("-$(echo "${v,,}" | tr '_' '-')" "${!v}"); fi
+    done
     exec go run . "${args[@]}"
 
 # Frontend dev loop: vite with hot reload on :5173 (proxies /rt,
@@ -553,8 +569,12 @@ dev: caps types
     set -e
     geo=(); if [ -n "${GEOCODER:-}" ]; then geo=(-geocoder "$GEOCODER"); fi
     store=(); if [ -n "${STORE:-}" ]; then store=(-store "$STORE"); fi
+    oidc=()
+    for v in OIDC_ISSUER OIDC_JWKS_URL OIDC_AUDIENCE OIDC_KEY OIDC_ROLES_CLAIM POLICY; do
+        if [ -n "${!v:-}" ]; then oidc+=("-$(echo "${v,,}" | tr '_' '-')" "${!v}"); fi
+    done
     (cd server && go build -o /tmp/transit-server . && \
-      /tmp/transit-server "${geo[@]}" "${store[@]}" >/tmp/transit-server.log 2>&1 & echo $! >/tmp/transit-server.pid)
+      /tmp/transit-server "${geo[@]}" "${store[@]}" "${oidc[@]}" >/tmp/transit-server.log 2>&1 & echo $! >/tmp/transit-server.pid)
     trap 'kill "$(cat /tmp/transit-server.pid)" 2>/dev/null || true' EXIT
     cd web && npx vite
 
