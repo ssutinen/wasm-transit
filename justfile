@@ -684,14 +684,18 @@ mutants:
     cargo mutants -p transit-codec -p transit-router -p transit-sync -p transit-plans
 
 # Model-check the sync store engine (server/store/store.tla, run with
-# TLC over store.cfg) — the engine's invariants: ref integrity, an
-# append-only chained log, GC safety, CAS authority, crash safety
+# TLC) — the engine's invariants: ref integrity, an append-only chained
+# log, GC safety, CAS authority, crash safety
 # (docs/units/sync-persistence.md). OPTIONAL: run it only when a change
 # touches the sync engine (server/store/, the /pointers + /blobs +
 # /edits store surface, or the spec itself) — nothing else needs Java.
 # Needs Java 11+ (current tla2tools) and tla2tools.jar from
 # github.com/tlaplus/tlaplus/releases (the user's install; TLA_JAR or
 # ~/bin/tla2tools.jar). Deliberately NOT part of `just test`.
+# Bounds: store.cfg (small, pinned) by default; the exhaustive tier is
+# SPEC_CFG=server/store/store-exhaustive.cfg just spec (blob-hash
+# symmetry, bigger bounds, still exhaustive). TLC_WORKERS / TLC_XMX
+# size the run.
 spec:
     #!/usr/bin/env bash
     set -e
@@ -702,4 +706,10 @@ spec:
         echo "nothing else needs Java: 'just test' runs without it"
         exit 1
     fi
-    java -XX:+UseParallelGC -cp "$jar" tlc2.TLC -config server/store/store.cfg server/store/store.tla
+    # Bounds: store.cfg (small, the pinned quick check) by default;
+    # SPEC_CFG=server/store/store-exhaustive.cfg for the bigger run
+    # (blob-hash symmetry makes it exhaustive at much larger bounds).
+    # TLC_WORKERS (default auto) and TLC_XMX (e.g. 8g) size the run.
+    cfg="${SPEC_CFG:-server/store/store.cfg}"
+    java -XX:+UseParallelGC ${TLC_XMX:+-Xmx"$TLC_XMX"} -cp "$jar" tlc2.TLC \
+        -workers "${TLC_WORKERS:-auto}" -config "$cfg" server/store/store.tla

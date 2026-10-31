@@ -64,9 +64,14 @@ and-append (old authority readable, orphan collected at next `Open`),
 delta sync (`/log?since=`, unknown since → whole document), the
 `/blobs` ETag/envelope headers, and `just spec` model-checking
 `server/store/store.tla` clean (TLC 2.19, 2026-10-30, in a toolbox
-container: 1207 states generated, 214 distinct, no invariant violations,
-fingerprint-collision estimate 1.2E-14; `CHECK_DEADLOCK FALSE` for the
-artificial `MaxCommits` bound), plus the D-56 clock clamp through the
+container, `store.cfg` with blob-hash `SYMMETRY`: 1207 states
+generated, 214 distinct, no invariant violations, fingerprint-collision
+estimate 1.2E-14; `CHECK_DEADLOCK FALSE` for the artificial `MaxCommits`
+bound; the exhaustive tier `store-exhaustive.cfg` — BlobSet 5,
+MaxCommits 8 — via `SPEC_CFG=… just spec`, clean on Java 25 / TLC 2.19
+2026-10-30 with 8 workers: 72756 states generated, 8750 distinct,
+depth 10, no invariant violations, fingerprint-collision estimate
+3.0E-11), plus the D-56 clock clamp through the
 receive path, and edits surviving a server restart; `cargo test`
 pins the transit-sync laws (clamp, compact, envelope) and the cap-sync
 seam (canonical document + hash in every answer); caps-smoke pins the

@@ -25,6 +25,11 @@ CONSTANTS
     BlobSet,        \* the finite set of hashes blobs may take
     MaxCommits      \* bound on log length
 
+(* The blob hashes are interchangeable — every action and invariant
+   treats BlobSet uniformly — so TLC can exploit symmetry (cfg:
+   SYMMETRY Symmetry) and check far larger bounds per distinct state. *)
+Symmetry == Permutations(BlobSet)
+
 VARIABLES
     blobs,          \* set of durable blob hashes
     logs,           \* Seq of [from |-> h, to |-> h] — append-only

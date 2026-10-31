@@ -43,7 +43,11 @@ optional: `just spec` model-checks the sync store engine
 (`server/store/store.tla`) and needs Java 11+ plus tla2tools.jar —
 run it only when a change touches the sync engine (`server/store/`,
 the store's HTTP surface, or the spec itself); nothing else requires
-Java, and `just test` never does.
+Java, and `just test` never does. Default bounds are the small pinned
+`store.cfg`; the exhaustive tier is
+`SPEC_CFG=server/store/store-exhaustive.cfg just spec` (blob-hash
+symmetry, larger bounds, still exhaustive; `TLC_WORKERS`/`TLC_XMX`
+size the run).
 
 1. **Unit/property tests in the owning crate** (oracle style for
    laws — e.g. `transit-network`'s `trip_law_test` holds that trips
